@@ -33,6 +33,11 @@ CLIENT_JS = HERE / "client.js"
 ICON_SVG = HERE / "icon.svg"
 GRAPH_JS = HERE / "graph.js"
 
+# 헤드폰 서라운드를 화면에 내놓을지. 엔진의 서라운드는 일반 머리 모델과 스테레오 입력이라 "넓고 감싸는 공간감"까지만
+# 만들어서, 이름이 약속하는 만큼 되기 전까지 숨긴다. False면 서라운드 구역, 무대 그림 자산, set_spatial 동작,
+# stage_input 상태가 정의에서 빠지고, client는 엔진에 spatial 0을 보낸다(client.js의 SURROUND).
+SURROUND = False
+
 ENGINE_ASSET = "eq-engine"
 # 엔진 자산이 업로드(upload.json의 data_base64)에서 차지할 수 있는 base64 글자 수. MCP 도구 호출 한 번에 실려 가는 한도다.
 ENGINE_BUDGET = 60_000
@@ -90,10 +95,11 @@ engine_info = None if dll is None else {"asset": ENGINE_ASSET, "sha256": hashlib
 bridge_bytes = ("﻿" + bridge).encode("utf-8")
 bridge_info = {"gz": gzip_b64(bridge_bytes), "key": "eq-bridge-" + hashlib.sha256(bridge_bytes).hexdigest()[:12]}
 client = strip(CLIENT_JS.read_text(encoding="utf-8"), "//")
-for mark in ("__BRIDGE__", "__ENGINE__"):
+MARKS = {"__BRIDGE__": bridge_info, "__ENGINE__": engine_info, "__SURROUND__": SURROUND}
+for mark, value in MARKS.items():
     if client.count(mark) != 1:
         sys.exit(f"build.py: client.js에 {mark} 자리표시자가 정확히 한 번 있어야 합니다.")
-client = client.replace("__BRIDGE__", json.dumps(bridge_info)).replace("__ENGINE__", json.dumps(engine_info))
+    client = client.replace(mark, json.dumps(value))
 client_bytes = client.encode("utf-8")
 icon_bytes = ICON_SVG.read_bytes()
 ICON_VERSION = version_of(icon_bytes)
@@ -117,7 +123,7 @@ def graph_html(mode):
             f"<body><canvas></canvas><script>{script}</script></body></html>").encode("utf-8")
 
 
-GRAPHS = {mode: graph_html(mode) for mode in ("curve", "stage")}
+GRAPHS = {mode: graph_html(mode) for mode in ("curve", *(("stage",) if SURROUND else ()))}
 GRAPH_VERSIONS = {mode: version_of(data) for mode, data in GRAPHS.items()}
 
 # ── 화면 ────────────────────────────────────────────────────
@@ -135,7 +141,7 @@ header = {"type": "toolbar", "start": [
     {"type": "button", "label": "기본값으로 되돌리기", "icon": "rotate-ccw", "variant": "ghost", "disabled": C("no_device"),
      "on_click": act("reset_all"),
      "confirm": {"title": "이 기기의 설정을 기본값으로 되돌릴까요?",
-                 "body": "공간, 장르, 정도, 서라운드, 세부 조정, 프리앰프가 처음 값(원래 소리)으로 돌아갑니다. 내 프리셋과 다른 기기의 설정은 그대로 남아요.",
+                 "body": f"공간, 장르, 정도, {'서라운드, ' if SURROUND else ''}세부 조정, 프리앰프가 처음 값(원래 소리)으로 돌아갑니다. 내 프리셋과 다른 기기의 설정은 그대로 남아요.",
                  "ok": "되돌리기"}},
 ]}
 
@@ -275,7 +281,7 @@ def scroll(*children):
 settings = [scenes, *axis_sections, mine, details]
 # 그림 둘은 같은 꼴의 구역에 담아 폭이 같게 한다(구역 안쪽 여백까지 같다).
 curve_section = {"type": "section", "title": "EQ", "child": curve}
-visuals = [curve_section, spatial]
+visuals = [curve_section, *([spatial] if SURROUND else [])]
 # 넓은 창: 왼쪽은 고르는 것, 오른쪽은 보는 것. 두 칸이 반씩 나눠 갖고 각자 스크롤한다(설정을 내려도 그림은 그대로).
 wide = {"type": "when", "min_width": WIDE, "child": {
     "type": "stack", "direction": "row", "gap": "large", "fill": [0, 1],
@@ -308,14 +314,17 @@ OUTPUTS = {
     "setup_has_button": False, "need_folder": False, "note_show": False, "note": "",
     "scenes": [], "space_amount_show": False, "space_amount": 100,
     **{k: v for f, _ in AXES for k, v in ((f + "s", []), (f + "_amount_show", False), (f + "_amount", 100), (f + "_desc", ""))}, "scene_desc": "", "fresh_show": False, "fresh_text": "", "copy_options": [], "copy_value": None,
-    "spatial": "0", "spatial_options": [], "spatial_hint": "",
+    **({"spatial": "0", "spatial_options": [], "spatial_hint": ""} if SURROUND else {}),
     "tones": [], "bands": [], "custom": False, "not_custom": True, "custom_meta": "",
     "auto_preamp": True, "manual_preamp": False, "preamp": 0, "preamp_text": "",
     "mine_show": False, "mine": [], "mine_selected": None, "engine_show": False, "engine_text": "",
 }
-ACTIONS = ["power", "setup", "pick_scene", "pick_mine", "delete_mine", "set_spatial", "set_tone", "set_band",
+ACTIONS = ["power", "setup", "pick_scene", "pick_mine", "delete_mine", *(["set_spatial"] if SURROUND else []), "set_tone", "set_band",
            "reset_scene", "save_mine", "set_auto_preamp", "set_preamp", "copy_from", "reinstall", "uninstall",
            "dismiss_note", "recheck", "set_space_amount", "reset_all"] + [a for f, _ in AXES for a in ("pick_" + f, "set_" + f + "_amount")]
+
+# client ↔ 그림이 주고받는 창 상태. stage_input은 서라운드 무대가 있을 때만.
+STATE_KEYS = ["view", *(["stage_input"] if SURROUND else []), "curve_input"]
 
 definition = {
     "id": "eq",
@@ -352,7 +361,7 @@ definition = {
         "runtime": "javascript",
         "entry": {"id": "eq-client", "version": CLIENT_VERSION},
         "storage_entries": ["profiles", "my_presets", "eq"],
-        "state_keys": ["view", "stage_input", "curve_input"],
+        "state_keys": STATE_KEYS,
         "process_permissions": ["bridge"],
         # 다리 스크립트 파일. process.file_uri는 창 범위 저장소만 가리킨다. 창을 지우면 쉘이 함께 지운다.
         "device_storage": {"prefixes": ["bridge/"], "scope": "window"},
@@ -361,7 +370,7 @@ definition = {
     },
     "window_title": {"title": "EQ"},
     # client ↔ 그림(sandbox): view = 그릴 값, stage_input = 무대를 끈 값, curve_input = 곡선에서 끈 밴드.
-    "state": {"view": None, "stage_input": None, "curve_input": None},
+    "state": {key: None for key in STATE_KEYS},
     "ui": ui,
 }
 

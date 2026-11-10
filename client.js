@@ -263,6 +263,9 @@
   // build.py가 넣는 엔진 자산 정보 {asset: 자산 id, sha256: 날 DLL의 SHA-256}. 엔진 없이 빌드한 판(--no-engine)이면 null이고,
   // 그때는 엔진을 따로 설치해야 한다(설치된 엔진에 설정을 보내는 길은 그대로 돈다).
   const ENGINE = __ENGINE__;
+  // build.py가 넣는 헤드폰 서라운드 노출 여부(build.py의 SURROUND). false면 화면에 손잡이가 없으므로 엔진에도 끈 값(0)을
+  // 보낸다. 기기에 저장된 값(p.spatial)은 지우지 않아 다시 켜면 그대로 돌아온다.
+  const SURROUND = __SURROUND__;
   const WORK = "work"; // 다리를 띄울 작업 폴더 권한(파일은 만들지 않는다).
 
   let profiles = {}, mine = [], legacy = null;
@@ -470,7 +473,7 @@
         dirty = false;
         const { d, p, scene } = current();
         if (!handle || !engine || !engine.installed || !d) continue;
-        const body = { op: "apply", device_id: d.id, config: renderConfig(p, scene) };
+        const body = { op: "apply", device_id: d.id, config: renderConfig(SURROUND ? p : { ...p, spatial: 0 }, scene) };
         const key = JSON.stringify([handle, engine, d.registered, body]);
         if (key === applied) continue;
         applied = key;
@@ -566,7 +569,6 @@
     const name = splitName(d && d.name);
     const others = Object.entries(profiles).filter(([id]) => !d || id !== d.id)
       .map(([id, q]) => ({ value: id, label: `${q.name ? splitName(q.name).title : "다른 기기"}: ${labelOf(profileOf(profiles, id), layerOf(cat(), profileOf(profiles, id)))}` }));
-    const spatial = SPATIAL.reduce((a, b) => (Math.abs(b.amount - num(p.spatial)) < Math.abs(a.amount - num(p.spatial)) ? b : a));
     k.publish({
       device_title: d ? name.title : callMode ? splitName(device.name).title : "출력 장치 없음",
       device_meta: d ? [name.sub || KIND[d.kind] || KIND.other, on ? label : "꺼짐(원래 소리)", engineState(d)].join(", ")
@@ -595,10 +597,12 @@
         : `처음 쓰는 기기라 이전 EQ 설정(${layerOf(cat(), startOf(legacy)).name})으로 시작했어요.`,
       copy_options: others,
       copy_value: null, // 고르면 곧바로 가져오고 고르기는 비운다.
-      spatial: spatial.value,
-      spatial_options: SPATIAL.map(({ value, label: l }) => ({ value, label: l })),
-      spatial_hint: d && d.kind === "speakers" ? "헤드폰용이에요. 스피커에서는 효과가 거의 없어요."
-        : "호를 끌어 소리가 머리를 감싸는 정도를 정해요. 넓힐수록 스피커로 듣는 것처럼 머리 밖으로 퍼져요.",
+      ...(SURROUND ? {
+        spatial: SPATIAL.reduce((a, b) => (Math.abs(b.amount - num(p.spatial)) < Math.abs(a.amount - num(p.spatial)) ? b : a)).value,
+        spatial_options: SPATIAL.map(({ value, label: l }) => ({ value, label: l })),
+        spatial_hint: d && d.kind === "speakers" ? "헤드폰용이에요. 스피커에서는 효과가 거의 없어요."
+          : "호를 끌어 소리가 머리를 감싸는 정도를 정해요. 넓힐수록 스피커로 듣는 것처럼 머리 밖으로 퍼져요.",
+      } : {}),
       tones: TONES.map(t => ({ key: t.key, label: t.label, hz: t.hz, value: toneOf(p, t) })),
       bands: FREQS.map((f, i) => ({ key: String(i), index: i, label: BAND_NAMES[i],
                                     hz: f >= 1000 ? `${f / 1000} kHz` : `${f} Hz`, gain: round1(gains[i]) })),
@@ -681,7 +685,7 @@
     const tone = TONES.find(t => t.key === keyOf(c));
     if (tone) updateProfile(p => setTone(p, tone, c.event));
   });
-  k.handle("set_spatial", c => {
+  if (SURROUND) k.handle("set_spatial", c => {
     const s = SPATIAL.find(x => x.value === String(c.event));
     if (s) updateProfile(p => ({ ...p, spatial: s.amount }));
   });

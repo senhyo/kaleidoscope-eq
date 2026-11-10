@@ -6,7 +6,7 @@ EQ를 몰라도 공간을 고르면 Windows의 모든 소리가 바뀌는 [kalei
 
 | 부분 | 파일 | 하는 일 |
 |---|---|---|
-| 화면 | `client.js`, `graph.js`, `build.py` | 공간, 장르, 음색 고르기, 기기별 저장, EQ 곡선과 서라운드 그림. `build.py`가 앱 정의와 자산을 만든다 |
+| 화면 | `client.js`, `graph.js`, `build.py` | 공간, 장르, 음색 고르기, 기기별 저장, EQ 곡선 그림. `build.py`가 앱 정의와 자산을 만든다. 헤드폰 서라운드 화면은 `build.py`의 `SURROUND`로 숨겨 두었다(엔진에는 0을 보낸다) |
 | 다리 | `bridge.ps1` | 화면과 엔진 사이를 잇는 PowerShell. 기기 목록, 기기 바뀜 알림, 설정 파일 쓰기, 설치(UAC) |
 | 엔진 | `engine/` | C++ APO. 장치의 EFX 목록 맨 앞에 붙어 모든 소리에 EQ, 잔향, 헤드폰 서라운드를 건다. 설치·제거 스크립트 `register.ps1` |
 
