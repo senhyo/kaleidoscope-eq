@@ -12,6 +12,11 @@
   창을 열 때마다 받지 않는다.
 - `--no-engine`: 엔진 자산을 빼고 빌드한다. client의 ENGINE이 null이 되어 설치 단계는 엔진을 따로 설치하라고 안내하고,
   다시 설치 단추는 정의에서 빠진다. 이미 설치된 엔진에 설정을 보내는 길(status, apply, 장치 바꾸기)은 그대로다.
+- macOS 엔진·다리 macos/build/keq-mac(macos/build.sh) → 자산 eq-mac. 엔진 DLL과 같은 꼴(base64(gzip)을 담은 JS 문자열
+  리터럴 한 문장, 같은 ENGINE_BUDGET)이고 client의 __MAC__({asset, sha256})에 날 실행 파일의 SHA-256을 넣는다. 있으면 process
+  권한 bridge-mac(command "sh")도 정의에 더한다. client는 Mac에서 이 자산을 창 저장소에 풀어 `sh -c 'chmod … && exec …'`로
+  다리를 띄운다(client.js의 「PowerShell 다리」 곁의 macOS 주석, CONTRACT.md §5). 없으면 안내만 찍고 __MAC__은 null,
+  권한·자산은 더하지 않는다(정의가 그전과 같다). --no-engine은 Windows DLL에만 걸린다.
 - 자산 판은 내용의 sha256에서 파생한다. 내용이 같으면 같은 판, 다르면 새 판이라 손으로 올릴 판 번호가 없다.
 """
 import base64
@@ -29,6 +34,7 @@ HERE = Path(__file__).parent
 BRIDGE_PS1 = HERE / "bridge.ps1"
 REGISTER_PS1 = HERE / "engine" / "register.ps1"
 ENGINE_DLL = HERE / "engine" / "build" / "KaleidoscopeEQ.dll"  # 엔진 빌드 산출물(engine/build.ps1)
+MAC_BIN = HERE / "macos" / "build" / "keq-mac"  # macOS 엔진·다리 빌드 산출물(macos/build.sh). 없으면 Mac 없는 판
 CLIENT_JS = HERE / "client.js"
 ICON_SVG = HERE / "icon.svg"
 GRAPH_JS = HERE / "graph.js"
@@ -39,6 +45,7 @@ GRAPH_JS = HERE / "graph.js"
 SURROUND = False
 
 ENGINE_ASSET = "eq-engine"
+MAC_ASSET = "eq-mac"
 # 엔진 자산이 업로드(upload.json의 data_base64)에서 차지할 수 있는 base64 글자 수. MCP 도구 호출 한 번에 실려 가는 한도다.
 ENGINE_BUDGET = 60_000
 
@@ -85,6 +92,17 @@ def engine_js(gz_b64):
     return (json.dumps(gz_b64) + ";\n").encode("ascii")
 
 
+def mac_binary():
+    """macos/build/keq-mac(arm64 Mach-O) 또는 None."""
+    if not MAC_BIN.is_file():
+        print(f"참고: {MAC_BIN.relative_to(HERE)} 이(가) 없어 macOS 엔진 없이 빌드합니다(macos/build.sh로 만들면 들어갑니다).")
+        return None
+    data = MAC_BIN.read_bytes()
+    if data[:4] not in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+        sys.exit(f"build.py: {MAC_BIN.relative_to(HERE)} 이(가) Mach-O 실행 파일이 아닙니다.")
+    return data
+
+
 bridge = bridge_script()
 dll = None if NO_ENGINE else engine_dll()
 engine_gz_b64 = None if dll is None else gzip_b64(dll)
@@ -92,10 +110,15 @@ engine_bytes = None if dll is None else engine_js(engine_gz_b64)
 # client가 설치 전에 맞춰 볼 날 DLL의 SHA-256. 엔진 없는 판이면 null.
 engine_info = None if dll is None else {"asset": ENGINE_ASSET, "sha256": hashlib.sha256(dll).hexdigest()}
 # 다리는 client 안에 gzip해 싣는다(크기). 프로세스 이름은 내용에서 지어, 다리가 바뀌면 예전 프로세스에 붙지 않는다.
+mac = mac_binary()
+mac_bytes = None if mac is None else engine_js(gzip_b64(mac))
+# client가 Mac에서 다리를 띄우기 전에 맞춰 볼 날 keq-mac의 SHA-256. Mac 엔진 없는 판이면 null.
+mac_info = None if mac is None else {"asset": MAC_ASSET, "sha256": hashlib.sha256(mac).hexdigest()}
+MAC_VERSION = None if mac_bytes is None else version_of(mac_bytes)
 bridge_bytes = ("﻿" + bridge).encode("utf-8")
 bridge_info = {"gz": gzip_b64(bridge_bytes), "key": "eq-bridge-" + hashlib.sha256(bridge_bytes).hexdigest()[:12]}
 client = strip(CLIENT_JS.read_text(encoding="utf-8"), "//")
-MARKS = {"__BRIDGE__": bridge_info, "__ENGINE__": engine_info, "__SURROUND__": SURROUND}
+MARKS = {"__BRIDGE__": bridge_info, "__ENGINE__": engine_info, "__MAC__": mac_info, "__SURROUND__": SURROUND}
 for mark, value in MARKS.items():
     if client.count(mark) != 1:
         sys.exit(f"build.py: client.js에 {mark} 자리표시자가 정확히 한 번 있어야 합니다.")
@@ -333,13 +356,17 @@ definition = {
     "icon": {"asset": "eq-icon", "version": ICON_VERSION},
     "assets": [{"id": "eq-icon", "version": ICON_VERSION}, {"id": "eq-client", "version": CLIENT_VERSION}]
               + [{"id": f"eq-graph-{m}", "version": v} for m, v in GRAPH_VERSIONS.items()]
-              + ([] if NO_ENGINE else [{"id": ENGINE_ASSET, "version": ENGINE_VERSION}]),
+              + ([] if NO_ENGINE else [{"id": ENGINE_ASSET, "version": ENGINE_VERSION}])
+              + ([] if mac is None else [{"id": MAC_ASSET, "version": MAC_VERSION}]),
     # 47: 기본 폴더(default_folder), 54: single_window.
     "requires": {"blocks": 54, "modules": {"client": 4, "process": 2, "files": 4, "storage": 1, "assets": 1}},
     "single_window": True,
     "window_size": {"width": 1040, "height": 760},
     "permissions": [
         {"module": "process", "id": "bridge", "label": "사운드 엔진과 이야기하기 (PowerShell)", "command": "powershell"},
+        # macOS: 창 저장소의 keq-mac을 sh가 chmod한 뒤 exec한다(client.js MAC_SPEC).
+        *([] if mac is None else [
+            {"module": "process", "id": "bridge-mac", "label": "사운드 엔진과 이야기하기 (macOS)", "command": "sh"}]),
         # process.start는 작업 폴더 권한이 꼭 있어야 한다. 다리는 그 폴더에 아무것도 쓰지 않는다.
         {"module": "files", "id": "work", "access": "read", "label": "EQ 작업 폴더", "default_folder": "music"},
     ],
@@ -362,7 +389,7 @@ definition = {
         "entry": {"id": "eq-client", "version": CLIENT_VERSION},
         "storage_entries": ["profiles", "my_presets", "eq"],
         "state_keys": STATE_KEYS,
-        "process_permissions": ["bridge"],
+        "process_permissions": ["bridge", *([] if mac is None else ["bridge-mac"])],
         # 다리 스크립트 파일. process.file_uri는 창 범위 저장소만 가리킨다. 창을 지우면 쉘이 함께 지운다.
         "device_storage": {"prefixes": ["bridge/"], "scope": "window"},
         "actions": ACTIONS,
@@ -385,6 +412,8 @@ uploads = [
     asset("eq-client", CLIENT_VERSION, "javascript", client_bytes, "eq-app/client.js"),
 ] + [asset(f"eq-graph-{m}", GRAPH_VERSIONS[m], "html", GRAPHS[m], "eq-app/graph.js") for m in GRAPHS] + ([] if NO_ENGINE else [
     asset(ENGINE_ASSET, ENGINE_VERSION, "javascript", engine_bytes, "eq-app/engine (KaleidoscopeEQ.dll, gzip+base64)"),
+]) + ([] if mac is None else [
+    asset(MAC_ASSET, MAC_VERSION, "javascript", mac_bytes, "eq-app/macos (keq-mac, gzip+base64)"),
 ])
 upload = json.dumps({"definition": definition, "asset_uploads": uploads}, ensure_ascii=False)
 
@@ -399,9 +428,17 @@ for u in uploads:
 if dll is not None:
     gz_len = len(base64.b64decode(engine_gz_b64))
     print(f"  엔진 DLL {len(dll):,}B → gzip {gz_len:,}B, sha256 {engine_info['sha256']}")
+if mac is not None:
+    print(f"  macOS keq-mac {len(mac):,}B → gzip {len(gzip.compress(mac, mtime=0)):,}B, sha256 {mac_info['sha256']}")
 print(f"  upload.json {len(upload.encode('utf-8')):,}B")
+if mac is not None:
+    used = len(next(u for u in uploads if u["id"] == MAC_ASSET)["data_base64"])
+    if used > ENGINE_BUDGET:
+        sys.exit(f"build.py: macOS 엔진 자산이 base64 {used:,}자로 한도 ENGINE_BUDGET {ENGINE_BUDGET:,}자를 넘습니다. "
+                 "MCP 도구 호출 한 번에 실을 수 없으니 keq-mac을 줄여야 합니다(한도를 올리지 말 것). "
+                 "생성물은 써 두었지만 올리지 마세요.")
 if dll is not None:
-    used = len(uploads[-1]["data_base64"])
+    used = len(next(u for u in uploads if u["id"] == ENGINE_ASSET)["data_base64"])
     if used > ENGINE_BUDGET:
         sys.exit(f"build.py: 엔진 자산이 base64 {used:,}자로 한도 ENGINE_BUDGET {ENGINE_BUDGET:,}자를 넘습니다. "
                  "MCP 도구 호출 한 번에 실을 수 없으니 엔진 DLL을 줄여야 합니다(한도를 올리지 말 것). "

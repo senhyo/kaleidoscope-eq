@@ -3,12 +3,15 @@
 Equalizer APO(서드파티)를 걷어내고 우리가 만든 APO로 Windows 시스템 소리 전체에 EQ·공간감을 건다.
 설치 때 관리자 승인(UAC) 한 번, 오디오 서비스 재시작(재부팅 없음). 이후 값 변경은 승인 없이 즉시 반영.
 
-세 부품과 소유 파일 (서로 남의 파일을 고치지 않는다):
+macOS는 같은 화면과 같은 DSP(`engine/src/dsp.cpp`)를 쓰고, 다리와 엔진을 실행 파일 하나(`keq-mac`)가 맡는다(§5).
+
+부품과 소유 파일 (서로 남의 파일을 고치지 않는다):
 
 | 부품 | 소유 파일 |
 |---|---|
 | 엔진 (C++ APO + 등록 스크립트) | `eq-app/engine/**` |
 | 다리 (PowerShell, 앱 ↔ 엔진) | `eq-app/bridge.ps1` (기존 `apo.ps1`을 대체·삭제) |
+| macOS 엔진·다리 (Objective-C++, 실행 파일 하나) | `eq-app/macos/**` (`engine/src/dsp.cpp`는 고치지 않고 그대로 넣는다) |
 | 화면 (kaleidoscope 앱) | `eq-app/client.js`, `eq-app/build.py`, `eq-app/icon.svg`, 생성물(`app.json`, `client.built.js`, `upload.json`, `def.min.json`) |
 
 ## 1. 엔진 설정 파일 (다리가 쓰고, APO가 읽는다)
@@ -65,3 +68,43 @@ device: {"id":"{guid}","name":"AirPods Pro","kind":"headphones|headset|speakers|
 요청 없이 다리가 먼저 보내는 알림: 기본 출력 장치가 바뀌면 `{"event":"device","device":{...}}` (1초 간격 감시).
 register.ps1 본문은 빌드 때 `build.py`가 bridge.ps1 안의 자리표시자 `__REGISTER_PS1__`에 넣는다(다리는 이것을 임시 .ps1로 써서 실행).
 블루투스 기기의 통화용(Hands-Free) 끝점은 `kind:"headset"`으로 구분만 하고, 화면은 음악용 끝점을 기준으로 설정을 저장한다.
+
+## 5. macOS (`macos/`, 실행 파일 `keq-mac`)
+
+관리자 권한, 드라이버, 재시동이 없다. 모든 것이 사용자 계정 안에 있다. Apple Silicon, macOS 14.2 이상.
+
+| 경로 (`~` = 사용자 홈) | 쓰는 쪽 | 내용 |
+|---|---|---|
+| `~/Library/Application Support/KaleidoscopeEQ/keq-mac` | 다리(install) | 설치된 엔진. 다리가 자기 실행 파일을 원자적으로 복사한다 |
+| `…/KaleidoscopeEQ/version` | 다리(install) | 설치한 판(`1.0.0`) |
+| `…/KaleidoscopeEQ/endpoints/<safe(UID)>.cfg` | 다리(apply) | §1과 같은 본문. 임시 파일에 쓴 뒤 rename |
+| `…/KaleidoscopeEQ/endpoints/<safe(UID)>.live` | 엔진 | IOProc이 실제로 불리기 시작하면 `pid <pid>`와 UTC 시각 |
+| `…/KaleidoscopeEQ/engine.state` | 엔진 | 첫 줄 상태, 둘째 줄 `pid <pid>` (아래) |
+| `~/Library/LaunchAgents/me.senhyo.kaleidoscope-eq.plist` | 다리(install) | `[keq-mac, "engine"]`, RunAtLoad, KeepAlive `{SuccessfulExit: false}`, ProcessType Interactive |
+| `~/Library/Logs/KaleidoscopeEQ/engine.log` | 엔진 | 생명 주기 기록(시작, 장치 전환, 오류, 상태 변화) |
+
+- 장치 id는 Core Audio의 장치 UID다. `safe(UID)`는 `[A-Za-z0-9._-]` 밖의 바이트를 `_`로 바꾼 것이다.
+- 엔진(`keq-mac engine`)은 이 프로세스를 뺀 전역 스테레오 프로세스 탭(원래 소리는 탭을 읽는 동안 묵음) + 기본 출력 장치를
+  주 장치로 하는 비공개 집합 장치를 만들어, IOProc에서 탭을 `keq::Processor`에 통과시켜 출력에 쓴다(버퍼 128프레임).
+  기본 출력 장치와 그 표본율을 따라가고(바뀌면 다시 만든다), 지금 장치의 .cfg를 250ms마다 보고(mtime·크기·inode) 바뀌면
+  Windows APO와 같이 `ParseConfig` → `Design` → `Inbox().Publish()`로 넘긴다. .cfg가 없거나 `enabled 0`이면 원음 그대로.
+  프로세스가 끝나면 탭이 사라져 소리는 원래대로 돌아온다.
+- `engine.state` 첫 줄: `starting`, `running <UID>`, `permission_pending <UID>`(시작 뒤 5초 동안 IOProc이 불리지 않음:
+  시스템 오디오 녹음 허용을 기다림), `permission_denied`, `unsupported`(macOS 14.2 미만), `error <글>`, `stopped`.
+- TCC(시스템 오디오 녹음)는 실행 파일에 넣은 Info.plist(번들 ID `me.senhyo.kaleidoscope-eq`)로 묻고, ad-hoc 서명이라
+  허용이 실행 파일의 CDHash에 묶인다. 엔진이 바뀌면(업데이트) 한 번 다시 묻는다.
+
+다리(`keq-mac bridge`)는 §4와 같은 줄 프로토콜·op·필드를 쓰고 다음만 다르다.
+- `install`: `dll_b64`·`endpoints`가 없다(있어도 무시). 실행 파일 복사, `endpoints/` 생성, LaunchAgent plist를 쓰고
+  `launchctl bootout`(없으면 무시) 뒤 `launchctl bootstrap gui/<uid>`. 다시 부르면 업데이트. 답에 `"launchd":"loaded"`.
+- `uninstall`: bootout, plist·실행 파일·상태·설정·기록을 모두 지운다(남기는 것 없음).
+- `device.kind`: 블루투스 → `headphones`, 내장 장치는 데이터 소스 `hdpn` → `headphones`, `ispk` → `speakers`, 그 밖은 `other`.
+  `headset`은 없다. `registered` = 엔진 설치됨(탭 하나가 모든 장치를 덮는다), `active` = 엔진이 돌고 있고 지금 그 장치를
+  처리 중(`engine.state`가 `running <그 UID>`이고 .live의 pid가 같은 살아 있는 keq-mac).
+- `engine`에 더하는 필드: `platform:"macos"`, `supported`(macOS 14.2 이상), `state`(위 상태, 프로세스가 없으면 `stopped`,
+  설치 전 null), `permission`(`granted`|`pending`|`denied`|null), `current`(설치된 엔진이 이 다리의 실행 파일과 같은가;
+  false면 화면이 업데이트를 권한다), `message`(state가 error일 때).
+- 알림 `{"event":"device","device":…}`은 기본 장치나 그 상태, 또는 엔진 상태가 마지막으로 알린 것과 달라지면(1초 간격).
+- 화면은 이 실행 파일을 자산 `eq-mac`(gzip+base64, `build.py`)에서 창 저장소 `bridge/eq-bridge-mac-<sha256 12자>/keq-mac`으로
+  풀고 `sh -c 'chmod 700 "$1" && exec "$1" bridge' keq <경로>`로 띄운다(process 권한 `bridge-mac`, command `sh`).
+- 시험용 환경 변수 `KEQ_HOME`: `~` 대신 쓰고, install/uninstall이 launchctl을 부르지 않는다.
