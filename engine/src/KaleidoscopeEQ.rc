@@ -1,0 +1,30 @@
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION KEQ_VERSION_MAJOR, KEQ_VERSION_MINOR, KEQ_VERSION_PATCH, 0
+ PRODUCTVERSION KEQ_VERSION_MAJOR, KEQ_VERSION_MINOR, KEQ_VERSION_PATCH, 0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Kaleidoscope"
+            VALUE "FileDescription", "Kaleidoscope EQ audio processing object"
+            VALUE "FileVersion", KEQ_VERSION_STR
+            VALUE "InternalName", "KaleidoscopeEQ"
+            VALUE "OriginalFilename", "KaleidoscopeEQ.dll"
+            VALUE "ProductName", "Kaleidoscope EQ"
+            VALUE "ProductVersion", KEQ_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
