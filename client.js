@@ -267,6 +267,12 @@
   // 보낸다. 기기에 저장된 값(p.spatial)은 지우지 않아 다시 켜면 그대로 돌아온다.
   const SURROUND = __SURROUND__;
   const WORK = "work"; // 다리를 띄울 작업 폴더 권한(파일은 만들지 않는다).
+  // macOS 쉘인지. kaleidoscope의 macOS 쉘 웹뷰는 UA에 "Macintosh; Intel Mac OS X 10_15_7"을 싣는다(Apple Silicon도 같다).
+  // macOS에서는 PowerShell 다리 대신 macos/의 keq-mac이 다리와 엔진을 함께 맡는다(CONTRACT.md §5). Windows 길은 그대로다.
+  const MAC = /Macintosh|Mac OS X/.test(navigator.userAgent);
+  // build.py가 넣는 macOS 엔진 자산 정보 {asset: 자산 id, sha256: 날 keq-mac의 SHA-256}. macos/build/keq-mac 없이
+  // 빌드한 판이면 null이고, 그 판은 Mac에서 다리를 띄우지 못한다(설치 화면이 그렇게 알린다).
+  const MAC_ENGINE = __MAC__;
 
   let profiles = {}, mine = [], legacy = null;
   let bridge = { phase: "starting", message: "" };
@@ -320,17 +326,31 @@
   //    열지 못하고 \\?\ 접두사도 받지 않는다. 그래서 짧은 -Command가 .NET의 긴 경로(\\?\)로 파일을 읽어 실행한다.
   // 파일 경로는 인자라 허용 기준에 들지 않는다. UTF-8 BOM을 붙여야 Windows PowerShell 5.1이 한글을 바로 읽는다.
   // 다리 프로세스 이름은 스크립트 내용으로 짓는다. 다리가 바뀌면 예전 프로세스에 붙지 않고 새로 띄운다.
-  const KEY = BRIDGE.key;
-  const BLOB = `bridge/${KEY}.ps1`;
+  // macOS의 다리 이름은 keq-mac의 SHA-256에서 짓는다. 새 실행 파일이면 새 프로세스로 띄우고 창 저장소에도 새로 쓴다.
+  const KEY = MAC ? `eq-bridge-mac-${MAC_ENGINE ? MAC_ENGINE.sha256.slice(0, 12) : "none"}` : BRIDGE.key;
+  const BLOB = MAC ? `bridge/${KEY}/keq-mac` : `bridge/${KEY}.ps1`;
   let handle = null, after = 0, partial = "", starting = null, seq = 0, writeChain = Promise.resolve();
   const waiting = new Map();
 
+  // macOS: file://의 경로가 곧 POSIX 경로다.
+  const macPathOf = uri => decodeURIComponent(new URL(uri).pathname);
+  // keq-mac을 창 저장소에 둔다. 자산은 이 key(실행 파일의 해시)가 저장소에 아직 없을 때만 받아 SHA-256을 맞춰 보고 쓴다.
+  // 지난 판의 다리 파일은 지운다(이미 뜬 프로세스는 파일이 지워져도 계속 돈다).
+  async function macBinary() {
+    const have = (await k.blobs.list({ prefix: "bridge/" })) || [];
+    if (!have.includes(BLOB)) {
+      const raw = await verifiedAsset(MAC_ENGINE, "사운드 엔진 다리 파일 검증에 실패해서 띄우지 않았어요");
+      await k.blobs.put({ key: BLOB, bytes: raw.buffer });
+    }
+    for (const old of have) if (old !== BLOB) await k.blobs.remove({ key: old }).catch(() => {});
+  }
   function pathOf(uri) {
     const u = new URL(uri), path = decodeURIComponent(u.pathname);
     const local = /^\/[A-Za-z]:/.test(path) ? path.slice(1) : path;
     return (u.host ? "\\\\" + u.host : "") + local.replace(/\//g, "\\");
   }
   async function scriptPath() {
+    if (MAC) { await macBinary(); return macPathOf(await k.process.file_uri(BLOB)); }
     const bytes = await gunzip(BRIDGE.gz);
     await k.blobs.put({ key: BLOB, bytes: bytes.buffer });
     return pathOf(await k.process.file_uri(BLOB));
@@ -341,6 +361,10 @@
     spec: { name: "EQ 사운드 엔진 다리", command: "powershell",
             args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", loader(file)], env: {} } });
   // C:\... → \\?\C:\..., \\server\share\... → \\?\UNC\server\share\... (작은따옴표는 PowerShell 식으로 겹친다)
+  // macOS: 창 저장소의 파일에는 실행 권한이 없어 sh가 chmod한 뒤 exec한다. 경로는 인자라 허용 기준에 들지 않고,
+  // 쉘은 앱·권한·프로그램(sh)·env마다 한 번만 묻는다. "keq"는 sh -c의 $0 자리다.
+  const MAC_SPEC = file => ({ key: KEY, permission: "bridge-mac", cwd_permission: WORK,
+    spec: { name: "EQ 사운드 엔진 다리", command: "sh", args: ["-c", 'chmod 700 "$1" && exec "$1" bridge', "keq", file], env: {} } });
   function loader(file) {
     const long = file.startsWith("\\\\") ? "\\\\?\\UNC\\" + file.slice(2) : "\\\\?\\" + file;
     return `& ([scriptblock]::Create([IO.File]::ReadAllText('${long.replace(/'/g, "''")}')))`;
@@ -348,7 +372,7 @@
   async function launch() {
     const file = await scriptPath();
     if (!handle) setBridge("permission");
-    return k.process.start(SPEC(file));
+    return k.process.start((MAC ? MAC_SPEC : SPEC)(file));
   }
   // start나 attach의 결과를 다리로 삼는다. 이미 다리가 있으면(다시 띄운 허용 창이 먼저 끝난 경우) 그대로 둔다.
   function adopt(r) {
@@ -365,6 +389,7 @@
     if (starting) return starting;
     starting = (async () => {
       try {
+        if (MAC && !MAC_ENGINE) return false; // 띄울 다리가 없다(setup이 알린다)
         if (adopt(await k.process.attach({ key: KEY }))) return true;
         if (!k.files.grant(WORK)) { setBridge("need_folder"); return false; }
         if (adopt(await launch())) return true;
@@ -499,6 +524,7 @@
 
   // 처음 설정은 지금 해야 할 일 하나만 보인다.
   function setup(d) {
+    if (MAC) return setupMac(d);
     if (bridge.phase === "need_folder") return { key: "folder", title: "시작하기",
       text: "EQ가 Windows 소리 설정과 이야기하려면 작업 폴더 하나를 정해야 해요. 아래에서 허용하면 끝이에요. 그 폴더에 파일을 만들지는 않아요." };
     if (bridge.phase === "cancelled") return { key: "allow", title: "실행 허용이 필요해요",
@@ -524,9 +550,49 @@
       text: "이 장치에는 아직 사운드 엔진이 붙어 있지 않아요. 관리자 확인 한 번이면 연결돼요.", button: "이 장치에 연결", icon: "power" };
     return null;
   }
+  // macOS의 처음 설정. 관리자 비밀번호, 드라이버, 재시동이 없고, 엔진이 처음 소리를 받을 때 macOS가
+  // 「시스템 오디오 녹음」을 한 번 묻는다(엔진이 바뀌면 다시 묻는다: ad-hoc 서명이라 허용이 실행 파일에 묶인다).
+  function setupMac(d) {
+    if (!MAC_ENGINE) return { key: "manual", title: "이 판에는 Mac용 사운드 엔진이 없어요",
+      text: "이 판은 Mac용 사운드 엔진(keq-mac) 없이 만들어져 Mac에서는 EQ를 걸 수 없어요. Mac용 엔진이 들어 있는 판으로 바꿔 주세요." };
+    if (bridge.phase === "need_folder") return { key: "folder", title: "시작하기",
+      text: "EQ가 Mac의 소리 설정과 이야기하려면 작업 폴더 하나를 정해야 해요. 아래에서 허용하면 끝이에요. 그 폴더에 파일을 만들지는 않아요." };
+    if (bridge.phase === "cancelled") return { key: "allow", title: "실행 허용이 필요해요",
+      text: "EQ는 sh로 사운드 엔진 다리(keq-mac)를 띄워 이야기해요. 「다시 시도」를 누르고 실행을 허용해 주세요.", button: "다시 시도", icon: "refresh-cw" };
+    if (bridge.phase === "permission") return { key: "permission", title: "sh 실행 허용을 기다려요",
+      text: "이 창에 「이 앱이 이 PC에서 sh 프로그램을 실행하게 할까요?」가 떠 있으면 「허용」을 눌러 주세요. 처음 한 번만 물어요. 허용 창이 보이지 않으면 아래 단추로 다시 띄워요.",
+      button: "허용 창 다시 띄우기", icon: "refresh-cw" };
+    if (bridge.phase === "error") return { key: "allow", title: "사운드 엔진과 연결하지 못했어요",
+      text: bridge.message || "알 수 없는 오류", button: "다시 시도", icon: "refresh-cw" };
+    if (bridge.phase !== "ready" || !engine) return { key: "loading", title: "사운드 엔진 상태를 읽는 중…", text: "곧 끝나요." };
+    if (engine.supported === false) return { key: "manual", title: "이 macOS에서는 쓸 수 없어요",
+      text: "Mac의 모든 소리에 EQ를 걸려면 macOS 14.2 이상(Apple Silicon)이 필요해요. macOS를 업데이트한 뒤 이 창을 다시 열어 주세요." };
+    if (busy === "install") return { key: "busy", title: "사운드 엔진 설치 중…",
+      text: "관리자 비밀번호 없이 내 계정에 설치해요. 곧 macOS가 「시스템 오디오 녹음」을 허용할지 물으면 「허용」을 눌러 주세요." };
+    if (!engine.installed) return { key: "install", title: "사운드 엔진 설치",
+      text: "Mac의 모든 소리에 EQ와 공간감을 걸려면 사운드 엔진을 한 번 설치해야 해요. 관리자 비밀번호나 드라이버 없이 내 계정에 설치하고, 처음 한 번 macOS가 「시스템 오디오 녹음」 허용을 물어요. 재시동은 필요 없어요.",
+      button: "사운드 엔진 설치", icon: "download" };
+    if (engine.current === false) return { key: "install", title: "사운드 엔진 업데이트",
+      text: "새 사운드 엔진이 있어요. 업데이트하면 macOS가 「시스템 오디오 녹음」 허용을 한 번 더 물어요(엔진 파일이 바뀌면 macOS가 다시 확인해요).",
+      button: "사운드 엔진 업데이트", icon: "download" };
+    if (engine.permission === "pending") return { key: "mac_permission", title: "시스템 오디오 녹음 허용을 기다려요",
+      text: "macOS가 「Kaleidoscope EQ」의 시스템 오디오 녹음을 허용할지 묻고 있으면 「허용」을 눌러 주세요. 물음이 보이지 않으면 시스템 설정 > 개인정보 보호 및 보안 > 시스템 오디오 녹음에서 keq-mac(Kaleidoscope EQ)을 켜 주세요. 받은 소리는 곧바로 스피커나 헤드폰으로 내보내고 저장하지 않아요." };
+    if (engine.permission === "denied") return { key: "mac_permission", title: "시스템 오디오 녹음이 꺼져 있어요",
+      text: "시스템 설정 > 개인정보 보호 및 보안 > 시스템 오디오 녹음에서 keq-mac(Kaleidoscope EQ)을 켜 주세요. 켜면 몇 초 안에 저절로 적용돼요. 그동안 소리는 원래대로 나와요." };
+    if (engine.state === "stopped" || engine.state === "error" || engine.state === "unsupported") return { key: "install", title: "사운드 엔진이 멈춰 있어요",
+      text: `${engine.message ? `엔진이 알린 문제: ${engine.message}. ` : ""}다시 설치하면 엔진을 새로 띄워요. 그동안 소리는 원래대로 나와요.`,
+      button: "다시 설치", icon: "refresh-cw" };
+    return null;
+  }
   // 처음 설정의 진행. 단계마다 끝났는지는 이미 가진 상태(폴더 허용, 다리, 엔진, 장치 등록)에서 파생한다.
   function progressOf(d) {
-    const steps = [
+    const steps = MAC ? [
+      ["작업 폴더 허용", !!k.files.grant(WORK)],
+      ["sh 실행 허용", !!handle],
+      ["엔진 상태 읽기", !!engine],
+      ["사운드 엔진 설치", !!(engine && engine.installed && engine.current !== false)],
+      ["시스템 오디오 녹음 허용", !!(engine && engine.permission === "granted")],
+    ] : [
       ["작업 폴더 허용", !!k.files.grant(WORK)],
       ["PowerShell 실행 허용", !!handle],
       ["엔진 상태 읽기", !!engine],
@@ -539,11 +605,22 @@
              label: at < 0 ? "" : `${n + 1}/${steps.length}단계: ${steps[at][0]}` };
   }
   function engineState(d) {
+    if (MAC) return engineStateMac(d);
     if (bridge.phase !== "ready" || !engine) return "사운드 엔진 확인 중…";
     if (!engine.installed) return "사운드 엔진이 필요해요";
     if (!d) return "출력 장치를 찾는 중…";
     if (!d.registered) return "이 장치에는 아직 연결 전";
     return d.active ? "적용 중" : "소리가 나오면 적용돼요";
+  }
+  // macOS: 탭 하나가 모든 장치를 덮어 「연결 전」이 없다. 엔진은 소리가 없어도 돌아서 적용 중이 아니면 시작·전환 중이다.
+  function engineStateMac(d) {
+    if (bridge.phase !== "ready" || !engine) return "사운드 엔진 확인 중…";
+    if (!engine.installed) return "사운드 엔진이 필요해요";
+    if (!d) return "출력 장치를 찾는 중…";
+    if (engine.permission === "pending") return "시스템 오디오 녹음 허용을 기다려요";
+    if (engine.permission === "denied") return "시스템 오디오 녹음이 꺼져 있어요";
+    if (engine.state === "stopped" || engine.state === "error" || engine.state === "unsupported") return "사운드 엔진이 멈춰 있어요";
+    return d.active ? "적용 중" : "사운드 엔진 시작 중…";
   }
   // 축마다 같은 꼴의 화면 값: <field>s(칩), <field>_amount_show/_amount(정도), <field>_desc(설명).
   function axisOutputs(p) {
@@ -746,12 +823,17 @@
   // 격리 프레임(sandbox="allow-scripts" srcdoc)은 출처가 null이어도 부모(http://tauri.localhost)의 보안 문맥을 이어받아
   // crypto.subtle이 있다(같은 꼴의 프레임을 Edge에서 띄워 isSecureContext·DecompressionStream·digest를 확인했다).
   // 다리에는 계약대로 날 DLL의 base64(dll_b64)를 보낸다.
-  async function engineDll() {
-    if (!ENGINE) throw new Error("이 판에는 사운드 엔진이 들어 있지 않아요");
-    const text = new TextDecoder().decode(await k.assets.bytes(ENGINE.asset)).trim();
+  // macOS의 eq-mac 자산(keq-mac)도 같은 꼴이다(macBinary).
+  async function verifiedAsset(info, failure) {
+    const text = new TextDecoder().decode(await k.assets.bytes(info.asset)).trim();
     const raw = await gunzip(JSON.parse(text.replace(/;$/, "")));
     const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", raw))].map(b => b.toString(16).padStart(2, "0")).join("");
-    if (hash !== ENGINE.sha256) throw new Error("엔진 파일 검증에 실패해서 설치하지 않았어요");
+    if (hash !== info.sha256) throw new Error(failure);
+    return raw;
+  }
+  async function engineDll() {
+    if (!ENGINE) throw new Error("이 판에는 사운드 엔진이 들어 있지 않아요");
+    const raw = await verifiedAsset(ENGINE, "엔진 파일 검증에 실패해서 설치하지 않았어요");
     let bin = "";
     for (let i = 0; i < raw.length; i += 32768) bin += String.fromCharCode(...raw.subarray(i, i + 32768));
     return btoa(bin);
@@ -759,8 +841,8 @@
   async function install(endpoints) {
     busy = "install"; note = ""; changed();
     try {
-      const dll_b64 = await engineDll();
-      const r = await request({ op: "install", dll_b64, ...(endpoints ? { endpoints } : {}) });
+      // macOS: 다리(keq-mac)가 자기 실행 파일을 설치하므로 실을 것이 없고, 장치마다 연결하는 단계도 없다.
+      const r = await request(MAC ? { op: "install" } : { op: "install", dll_b64: await engineDll(), ...(endpoints ? { endpoints } : {}) });
       if (r && r.elevated === "cancelled") note = "설치를 취소했어요. 준비되면 다시 눌러 주세요.";
       await request({ op: "status" });
       schedule();

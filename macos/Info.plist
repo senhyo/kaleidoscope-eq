@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>me.senhyo.kaleidoscope-eq</string>
+<key>CFBundleName</key><string>Kaleidoscope EQ</string>
+<key>CFBundleExecutable</key><string>keq-mac</string>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>NSAudioCaptureUsageDescription</key><string>Mac에서 나는 모든 소리에 EQ와 공간감을 걸려면 시스템 소리를 받아야 해요. 받은 소리는 곧바로 스피커·헤드폰으로 내보내고 어디에도 저장하거나 보내지 않아요.</string>
+</dict></plist>
