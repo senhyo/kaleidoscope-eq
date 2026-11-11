@@ -1,0 +1,8 @@
+# 자산 판 번호와 다리 이름은 파일 바이트에서 파생한다. OS와 git 설정에 따라 줄바꿈이 바뀌면 같은 커밋이 다른 판이 된다.
+# PowerShell 스크립트는 Windows 형식(CRLF), 나머지 글은 LF로 받는다.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.dll binary
+*.exe binary
+*.png binary
+*.wav binary
